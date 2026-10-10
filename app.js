@@ -1,4 +1,5 @@
 'use strict';
+import {decodeFilterState,encodeFilterState,defaultDirection} from './filter-url.mjs?v=51';
 const $=id=>document.getElementById(id), esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const norm=v=>String(v??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 const number=new Intl.NumberFormat('en-US'), compact=new Intl.NumberFormat('en-US',{notation:'compact',maximumFractionDigits:1});
@@ -13,6 +14,30 @@ const cover=b=>`<img class="cover" src="${esc(b.cover?safeURL(b.cover):fallback)
 const genresHTML=(b,all=false)=>{const g=visibleGenres(b);return g.slice(0,all?g.length:2).map(x=>`<span class="genre-pill">${esc(x)}</span>`).join('')+(!all&&g.length>2?`<span class="genre-extra">+${g.length-2}</span>`:'')};
 function bookType(b){if(b.genres.includes('Nonfiction'))return 'nonfiction';return b.genres.some(g=>['Fiction','Romance','Fantasy','Science Fiction','Historical Fiction','Literary Fiction','Mystery','Thriller'].includes(g))?'fiction':'unknown';}
 let publicationYears=[],yearBounds={min:null,max:null};
+let urlStateReady=false,urlUpdateTimer;
+function filterURLSnapshot(){
+ return {q:$('search').value,require:[...state.required],include:[...state.selected],exclude:[...state.excluded],rating:Number($('min-rating').value),ratings:Number($('min-count').value),from:yearBounds.min,to:yearBounds.max,sort:state.sort,direction:state.direction};
+}
+function syncFilterURL(){
+ clearTimeout(urlUpdateTimer);if(!urlStateReady)return;
+ const url=new URL(location.href);url.search=encodeFilterState(filterURLSnapshot(),url.search);
+ if(url.href!==location.href)history.replaceState(history.state,'',url);
+}
+function scheduleFilterURL(defer=false){
+ clearTimeout(urlUpdateTimer);if(!urlStateReady)return;
+ if(defer)urlUpdateTimer=setTimeout(syncFilterURL,200);else syncFilterURL();
+}
+function restoreFilterURL(){
+ clearTimeout(urlUpdateTimer);
+ const years=state.books.map(b=>b.publicationYear).filter(Number.isInteger);
+ const saved=decodeFilterState(location.search,{genres:[...new Set(state.books.flatMap(b=>b.genres))],earliest:Math.min(...years),latest:Math.max(...years)});
+ state.required=new Set(saved.require);state.selected=new Set(saved.include);state.excluded=new Set(saved.exclude);
+ state.sort=saved.sort;state.direction=saved.direction;
+ $('search').value=saved.q;$('min-rating').value=String(saved.rating);$('min-count').value=String(saved.ratings);
+ yearBounds={min:saved.from,max:saved.to};rebuildYearScale();
+}
+window.addEventListener('popstate',()=>{if(urlStateReady){restoreFilterURL();changed()}});
+window.addEventListener('pagehide',syncFilterURL);
 const formatYear=year=>year<0?`${Math.abs(year)} BCE`:String(year);
 function yearRange(){return {...yearBounds,active:yearBounds.min!==null||yearBounds.max!==null}}
 function yearLabel(){const {min,max}=yearRange();return min!==null&&max!==null?`${formatYear(min)}–${formatYear(max)}`:min!==null?`${formatYear(min)} onward`:max!==null?`Through ${formatYear(max)}`:''}
@@ -39,7 +64,7 @@ function setYearHandle(id,value){
  const year=publicationYears[value];if(year===undefined)return;
  if(id==='year-from')yearBounds.min=value===0?null:Math.min(year,yearBounds.max??Infinity);
  else yearBounds.max=value===publicationYears.length-1?null:Math.max(year,yearBounds.min??-Infinity);
- yearInputError();changed();
+ yearInputError();changed({deferURL:true});
 }
 function commitYearInputs(){
  const from=$('year-min'),to=$('year-max'),recorded=state.books.map(b=>b.publicationYear).filter(Number.isInteger),earliest=Math.min(...recorded),latest=Math.max(...recorded),min=from.value===''?earliest:Number(from.value),max=to.value===''?latest:Number(to.value);
@@ -73,7 +98,7 @@ function genreRows(){
  return [...new Set(state.books.flatMap(b=>b.genres))]
   .filter(g=>!hiddenGenres.has(g)&&(selected(g)||(available.has(g)&&norm(g).includes(query))))
   .map(g=>({genre:g,count:counts.get(g)||0}))
-  .sort((a,b)=>b.count-a.count||a.genre.localeCompare(b.genre));
+  .sort((a,b)=>Number(selected(b.genre))-Number(selected(a.genre))||b.count-a.count||a.genre.localeCompare(b.genre));
 }
 function setGenreRule(genre,key){
  const clear=state[key].has(genre);
@@ -82,7 +107,7 @@ function setGenreRule(genre,key){
 }
 function renderGenres(){
  const list=$('genres'),scrollTop=list.scrollTop;
- list.innerHTML=genreRows().map(({genre:g,count})=>`<div class="genre-option"><span class="genre-name" title="${esc(g)}">${esc(g)}</span><span class="genre-count">${number.format(count)}</span><div class="genre-actions" role="group" aria-label="${esc(g)} filter">${genreRules.map(([key,label,help])=>`<button type="button" data-genre="${esc(g)}" data-rule="${key}" aria-label="${label} ${esc(g)}" aria-pressed="${state[key].has(g)}" title="${help}">${label}</button>`).join('')}</div><button type="button" class="hide-genre" data-hide-genre="${esc(g)}" aria-label="Hide ${esc(g)} label" title="Hide label">×</button></div>`).join('')||'<p class="field-note">No matching genres.</p>';
+ list.innerHTML=genreRows().map(({genre:g,count})=>`<div class="genre-option"><span class="genre-name" title="${esc(g)}">${esc(g)}</span><span class="genre-count">${number.format(count)}</span><div class="genre-actions" role="group" aria-label="${esc(g)} filter">${genreRules.map(([key,label,help])=>`<button type="button" data-genre="${esc(g)}" data-rule="${key}" aria-label="${label} ${esc(g)}" aria-pressed="${state[key].has(g)}" title="${help}"><span>${label}</span></button>`).join('')}</div><button type="button" class="hide-genre" data-hide-genre="${esc(g)}" aria-label="Hide ${esc(g)} label" title="Hide label">×</button></div>`).join('')||'<p class="field-note">No matching genres.</p>';
  list.scrollTop=scrollTop;
 }
 function recordedDate(value){const raw=value||state.checkedDate;const date=new Date(/^\d{4}-\d{2}-\d{2}$/.test(raw)?raw+'T12:00:00Z':raw);return Number.isNaN(date.getTime())?recordedDate(state.checkedDate):date.toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric',timeZone:'America/Los_Angeles'});}
@@ -99,45 +124,70 @@ function renderFilterChips(){
  $('active-filters').innerHTML=chips.map(c=>`<button class="filter-chip ${c.group==='excluded'?'exclude-chip':''}" ${c.group?`data-remove-group="${c.group}" data-remove-value="${esc(c.value)}"`:`data-remove-filter="${c.filter}"`} aria-label="Remove ${esc(c.label)} filter">${esc(c.label)} <span aria-hidden="true">×</span></button>`).join('');
  $('filters-open').classList.toggle('has-filters',chips.length>0);
 }
-let genreHelpTimer;
-function hideGenreHelp(){clearTimeout(genreHelpTimer);$('genre-help-tooltip').hidden=true}
+let genreHelpTimer,genreHelpPinned=false;
+function hideGenreHelp(){clearTimeout(genreHelpTimer);genreHelpPinned=false;$('genre-help-tooltip').hidden=true;$('genre-help').setAttribute('aria-expanded','false')}
 function showGenreHelp(){
- clearTimeout(genreHelpTimer);const tooltip=$('genre-help-tooltip');tooltip.hidden=false;
+ clearTimeout(genreHelpTimer);const tooltip=$('genre-help-tooltip');tooltip.hidden=false;$('genre-help').setAttribute('aria-expanded','true');
  const anchor=$('genre-help').getBoundingClientRect(),bounds=tooltip.getBoundingClientRect();
  tooltip.style.left=`${Math.max(12,Math.min(anchor.left,innerWidth-bounds.width-12))}px`;
  tooltip.style.top=`${anchor.bottom+8}px`;
 }
 const scheduleGenreHelpHide=()=>{clearTimeout(genreHelpTimer);genreHelpTimer=setTimeout(hideGenreHelp,120)};
-$('genre-help').addEventListener('pointerenter',showGenreHelp);
-$('genre-help').addEventListener('pointerleave',scheduleGenreHelpHide);
-$('genre-help').addEventListener('focus',showGenreHelp);
-$('genre-help').addEventListener('blur',scheduleGenreHelpHide);
-$('genre-help').addEventListener('click',showGenreHelp);
+$('genre-help').setAttribute('aria-expanded','false');
+$('genre-help').addEventListener('pointerenter',e=>{if(e.pointerType!=='touch')showGenreHelp()});
+$('genre-help').addEventListener('pointerleave',()=>{if(!genreHelpPinned)scheduleGenreHelpHide()});
+$('genre-help').addEventListener('focus',()=>{if($('genre-help').matches(':focus-visible'))showGenreHelp()});
+$('genre-help').addEventListener('blur',hideGenreHelp);
+$('genre-help').addEventListener('click',()=>{if(genreHelpPinned){hideGenreHelp();return}genreHelpPinned=true;showGenreHelp()});
 $('genre-help-tooltip').addEventListener('pointerenter',()=>clearTimeout(genreHelpTimer));
-$('genre-help-tooltip').addEventListener('pointerleave',scheduleGenreHelpHide);
+$('genre-help-tooltip').addEventListener('pointerleave',()=>{if(!genreHelpPinned)scheduleGenreHelpHide()});
+$('genre-help-tooltip').addEventListener('click',hideGenreHelp);
+document.addEventListener('pointerdown',e=>{if(!e.target.closest('#genre-help,#genre-help-tooltip'))hideGenreHelp()});
+let mobileFilterScrollY=null;
 function positionFilters(){
  const panel=$('filters-popover');if(panel.hidden)return;
+ if(mobileLayout.matches){
+  if(mobileFilterScrollY===null){
+   // Capture the layout height once. The keyboard may obscure this page, but
+   // must not resize its action bar. No fixed-body or input-focus workarounds.
+   const pageHeight=Math.max(document.documentElement.clientHeight,window.innerHeight);
+   mobileFilterScrollY=window.scrollY;
+   panel.style.setProperty('--mobile-filter-height',`${pageHeight}px`);
+   document.body.classList.add('mobile-filters-open');
+   panel.setAttribute('role','region');
+   window.scrollTo({top:0,behavior:'instant'});
+  }
+  panel.style.removeProperty('left');panel.style.removeProperty('top');panel.style.removeProperty('max-height');
+  return
+ }
  const anchor=$('filters-open').getBoundingClientRect(),margin=12;
  panel.style.maxHeight=`${Math.max(180,window.innerHeight-anchor.bottom-margin*2)}px`;
  panel.style.left=`${Math.max(margin,Math.min(anchor.left,window.innerWidth-panel.offsetWidth-margin))}px`;
  panel.style.top=`${anchor.bottom+8}px`;
 }
 function closeFilters(restoreFocus=false){
+ if($('filters-popover').contains(document.activeElement))document.activeElement.blur();
  hideGenreHelp();$('filters-popover').hidden=true;$('filters-open').setAttribute('aria-expanded','false');
+ document.body.classList.remove('mobile-filters-open');
+ $('filters-popover').style.removeProperty('--mobile-filter-height');
+ $('filters-popover').setAttribute('role','dialog');
+ if(mobileFilterScrollY!==null){window.scrollTo({top:mobileFilterScrollY,behavior:'instant'});mobileFilterScrollY=null}
+ if(mobileLayout.matches)renderMobileResults(true);
  if(restoreFocus)$('filters-open').focus({preventScroll:true});
 }
 $('filters-open').addEventListener('click',()=>{
  const panel=$('filters-popover');if(!panel.hidden){closeFilters(true);return}
+ panel.querySelectorAll('.mobile-filter-tabs button[data-mobile-tab]').forEach(tab=>tab.setAttribute('aria-selected',String(tab.dataset.mobileTab===panel.dataset.mobileTab)));
  panel.hidden=false;$('filters-open').setAttribute('aria-expanded','true');positionFilters();panel.focus({preventScroll:true});
 });
 $('filters-close').addEventListener('click',()=>closeFilters(true));
 document.addEventListener('pointerdown',e=>{
- if(!$('filters-popover').hidden&&!e.target.closest('#filters-popover, #filters-open, dialog[open]'))closeFilters();
+ if(!mobileLayout.matches&&!$('filters-popover').hidden&&!e.target.closest('#filters-popover, #filters-open, #genre-help-tooltip, dialog[open]'))closeFilters();
 });
 document.addEventListener('keydown',e=>{
  if($('filters-popover').hidden||document.querySelector('dialog[open]'))return;
  if(e.key==='Escape'){e.preventDefault();if(!$('genre-help-tooltip').hidden){hideGenreHelp();return}closeFilters(true)}
- if(e.key==='Tab'){
+ if(e.key==='Tab'&&!mobileLayout.matches){
   const items=[...$('filters-popover').querySelectorAll('button:not(:disabled), input, select')].filter(el=>el.getClientRects().length);
   const first=items[0],last=items[items.length-1];
   if(document.activeElement===$('filters-popover')){e.preventDefault();(e.shiftKey?last:first)?.focus()}
@@ -145,17 +195,38 @@ document.addEventListener('keydown',e=>{
   else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}
  }
 });
-window.addEventListener('resize',()=>{hideGenreHelp();positionFilters()});$('filters-popover').addEventListener('scroll',hideGenreHelp);
+window.addEventListener('resize',()=>{hideGenreHelp();positionFilters()});$('filters-popover').addEventListener('scroll',hideGenreHelp,true);
 function updateResetButton(){
  $('show-hidden-labels').hidden=hiddenGenres.size===0;
  $('reset').disabled=!(yearRange().active||state.selected.size||state.required.size||state.excluded.size||hiddenGenres.size||state.type!=='all'||$('search').value.trim()||$('genre-search').value.trim()||$('year-error').textContent||Number($('min-rating').value)>0||Number($('min-count').value)>200000);
 }
-function render(){renderYearSlider();updateResetButton();hideGenreTooltip();renderGenres();const filtered=filterBooks();$('book-results').setAttribute('aria-busy','false');$('result-count').textContent=`${number.format(filtered.length)} book${filtered.length===1?'':'s'}${filtered.length!==state.books.length?' found':''}`;const sortLabels={ratingsCount:'ratings count',reviewsCount:'written reviews',averageRating:'average rating',title:'title',author:'author',genre:'genre'};$('result-detail').textContent=`${filtered.length!==state.books.length?`Of ${number.format(state.books.length)} in the collection · `:''}Sorted by ${sortLabels[state.sort]} ${state.direction==='desc'?'↓':'↑'}`;document.querySelectorAll('[data-book-type]').forEach(button=>{const active=button.dataset.bookType===state.type;button.classList.toggle('active',active);button.setAttribute('aria-pressed',active)});$('rating-value').textContent=Number($('min-rating').value)?`${Number($('min-rating').value).toFixed(1)}`:'Any';renderFilterChips();
-mountVirtualResults(filtered);
+function render(){renderYearSlider();updateResetButton();hideGenreTooltip();renderGenres();const filtered=filterBooks();$('book-results').setAttribute('aria-busy','false');$('result-count').textContent=`${number.format(filtered.length)} book${filtered.length===1?'':'s'}${filtered.length!==state.books.length?' found':''}`;const sortLabels={ratingsCount:'ratings count',reviewsCount:'written reviews',averageRating:'average rating',title:'title',author:'author',genre:'genre',publicationYear:'publication year'};$('result-detail').textContent=`${filtered.length!==state.books.length?`Of ${number.format(state.books.length)} in the collection · `:''}Sorted by ${sortLabels[state.sort]} ${state.direction==='desc'?'↓':'↑'}`;document.querySelectorAll('[data-book-type]').forEach(button=>{const active=button.dataset.bookType===state.type;button.classList.toggle('active',active);button.setAttribute('aria-pressed',active)});$('rating-value').textContent=Number($('min-rating').value)?`${Number($('min-rating').value).toFixed(1)}`:'Any';renderFilterChips();
+mountVirtualResults(filtered);if($('mobile-filter-done'))$('mobile-filter-done').textContent=`Show ${number.format(filtered.length)} books`;renderMobileSort();
 }
 const tableRow=(b,index)=>`<tr aria-rowindex="${index+1}" data-result-index="${index}"><td class="popularity-rank" aria-label="Overall popularity rank ${b.popularityRank}">${number.format(b.popularityRank)}</td><td aria-describedby="column-book"><div class="book-cell">${cover(b)}<div><a class="book-title" href="${esc(safeURL(b.url))}" target="_blank" rel="noopener noreferrer">${esc(b.title)}</a><p class="book-author">${esc(b.author)}${b.publicationYear!=null?` · ${b.publicationYear<0?Math.abs(b.publicationYear)+' BCE':b.publicationYear}`:''}</p></div></div></td><td class="genre-cell" tabindex="0" data-book-genres="${esc(visibleGenres(b).join(', '))}" aria-label="Genres: ${esc(visibleGenres(b).join(', '))}"><span class="table-genres">${esc(visibleGenres(b).join(', '))}</span></td><td class="metric avg" aria-describedby="column-averageRating">${b.averageRating.toFixed(2)}</td><td class="metric" aria-describedby="column-ratingsCount">${metric(b.ratingsCount)}</td><td class="metric" aria-describedby="column-reviewsCount">${metric(b.reviewsCount)}</td></tr>`;
 let virtualBooks=[],virtualRange='',virtualFrame=0;
+const mobileLayout=matchMedia('(max-width:760px)');
+const mobileRow=(b,index)=>`<article class="mobile-book-row" data-details="${esc(b.id)}" data-result-index="${index}" role="listitem" aria-posinset="${index+1}" aria-setsize="${virtualBooks.length}" style="top:${index*128}px"><div class="mobile-cover-stack"><button data-details="${esc(b.id)}" aria-label="Book details for ${esc(b.title)}">${cover(b)}</button><span>#${number.format(b.popularityRank)}</span></div><div class="mobile-book-content"><a class="book-title" href="${esc(safeURL(b.url))}" target="_blank" rel="noopener noreferrer">${esc(b.title)}</a><p class="book-author">${esc(b.author)}${b.publicationYear!=null?` · ${formatYear(b.publicationYear)}`:''}</p><button class="mobile-metadata" data-details="${esc(b.id)}" aria-label="All genres and details for ${esc(b.title)}"><span class="mobile-stats"><span aria-label="Average rating ${b.averageRating.toFixed(2)} out of 5"><span aria-hidden="true">★</span> <strong>${b.averageRating.toFixed(2)}</strong></span><span><strong>${metric(b.ratingsCount,true)}</strong> ratings</span></span><span class="mobile-genres">${esc(visibleGenres(b).join(' · '))}</span></button></div></article>`;
+// Retain overlapping rows and their decoded images; only window edges change.
+function reconcileVirtualRows(container,start,end,rowHTML,before=null){
+ const existing=new Map([...container.querySelectorAll(':scope > [data-result-index]')].map(row=>[Number(row.dataset.resultIndex),row]));
+ for(const [index,row] of existing)if(index<start||index>=end){row.remove();existing.delete(index)}
+ for(let index=start;index<end;index++){
+  if(existing.has(index))continue;
+  const template=document.createElement('template');template.innerHTML=rowHTML(virtualBooks[index],index);
+  const row=template.content.firstElementChild;
+  row.querySelectorAll('img.cover').forEach(img=>img.addEventListener('error',()=>{img.src=fallback},{once:true}));
+  const next=[...container.children].find(child=>Number(child.dataset.resultIndex)>index)||before;
+  container.insertBefore(row,next);
+ }
+}
+function updateVirtualSpacer(container,name,height){
+ let row=container.querySelector(`.virtual-spacer-${name}`);
+ if(!row){row=document.createElement('tr');row.className=`virtual-spacer virtual-spacer-${name}`;row.setAttribute('aria-hidden','true');row.innerHTML='<td colspan="6"></td>';container.insertBefore(row,name==='top'?container.firstChild:null)}
+ row.style.display=height?'table-row':'none';row.style.height=height+'px';row.firstElementChild.style.height=height+'px';return row;
+}
 function mountVirtualResults(books){
+ if(mobileLayout.matches){virtualBooks=books;virtualRange='';$('table-header').hidden=true;$('book-results').innerHTML=books.length?`<div id="mobile-virtual-list" role="list" aria-label="Books" style="height:${books.length*128}px"></div>`:'<div class="empty-state"><h3>No books match these filters.</h3><button id="empty-reset">Reset filters</button></div>';renderMobileResults(true);return}
  const viewport=$('book-results'),scrollTop=viewport.scrollTop;virtualBooks=books;virtualRange='';$('table-header').hidden=false;
  $('table-header').innerHTML=`<div class="table-header-scroll"><table aria-label="Sort books"><colgroup><col style="width:52px"><col style="width:calc(36% - 18.72px)"><col style="width:calc(27% - 14.04px)"><col style="width:calc(11% - 5.72px)"><col style="width:calc(13% - 6.76px)"><col style="width:calc(13% - 6.76px)"></colgroup><thead><tr><th class="rank-heading" aria-label="Overall popularity rank">Rank</th><th id="column-book"${ariaSort('title')}>${sortHeading('title','Book')} <button class="author-sort" data-sort="author" style="width:auto;margin-left:8px;font-size:11px" aria-label="Sort by author">/ Author ${state.sort==='author'?(state.direction==='asc'?'↑':'↓'):''}</button></th><th id="column-genre"${ariaSort('genre')}>${sortHeading('genre','Genre')}</th><th id="column-averageRating" class="metric"${ariaSort('averageRating')}>${sortHeading('averageRating','Avg. rating')}</th><th id="column-ratingsCount" class="metric"${ariaSort('ratingsCount')}>${sortHeading('ratingsCount','Ratings')}</th><th id="column-reviewsCount" class="metric"${ariaSort('reviewsCount')}>${sortHeading('reviewsCount','Written reviews')}</th></tr></thead></table></div>`;syncTableHeader();
  if(!books.length){viewport.innerHTML='<div class="empty-state"><h3>No books match these filters.</h3><p>Adjust your filters or search.</p><button id="empty-reset">Reset filters</button></div>';return}
@@ -163,6 +234,7 @@ function mountVirtualResults(books){
  renderVirtualResults(true,scrollTop);viewport.scrollTop=scrollTop;
 }
 function renderVirtualResults(force=false,scrollTop=$('book-results').scrollTop){
+ if(mobileLayout.matches){renderMobileResults(force);return}
  if(!virtualBooks.length)return;
  const viewport=$('book-results'),columns=1,rowHeight=86;
  syncTableHeader();
@@ -172,12 +244,22 @@ function renderVirtualResults(force=false,scrollTop=$('book-results').scrollTop)
  const start=firstRow*columns,end=Math.min(virtualBooks.length,endRow*columns),key=[start,end,rowHeight].join(':');
  if(!force&&key===virtualRange)return;virtualRange=key;hideGenreTooltip();
  const focused=document.activeElement,focusIndex=focused?.closest('[data-result-index]')?.dataset.resultIndex,focusSelector=focused?.matches('.book-title')?'.book-title':focused?.matches('[data-book-genres]')?'[data-book-genres]':null;
- const books=virtualBooks.slice(start,end),top=firstRow*rowHeight,bottom=(totalRows-endRow)*rowHeight;
- const spacer=h=>h?`<tr class="virtual-spacer" aria-hidden="true" style="height:${h}px"><td colspan="6" style="height:${h}px"></td></tr>`:'';$('virtual-rows').innerHTML=spacer(top)+books.map((b,i)=>tableRow(b,start+i)).join('')+spacer(bottom);
- viewport.querySelectorAll('img.cover').forEach(img=>img.addEventListener('error',()=>{img.src=fallback},{once:true}));updateGenreOverflow();
+ const top=firstRow*rowHeight,bottom=(totalRows-endRow)*rowHeight;
+ const rows=$('virtual-rows');updateVirtualSpacer(rows,'top',top);const bottomSpacer=updateVirtualSpacer(rows,'bottom',bottom);
+ reconcileVirtualRows(rows,start,end,tableRow,bottomSpacer);updateGenreOverflow();
  if(focusIndex!=null&&focusSelector)viewport.querySelector(`[data-result-index="${focusIndex}"] ${focusSelector}`)?.focus({preventScroll:true});
 }
+function renderMobileResults(force=false){
+ if(!$('filters-popover').hidden)return;
+ const list=$('mobile-virtual-list');if(!list||!virtualBooks.length)return;
+ const top=list.getBoundingClientRect().top+window.scrollY,h=128;
+ const start=Math.max(0,Math.min(virtualBooks.length-1,Math.floor((window.scrollY-top)/h)-5));
+ const end=Math.min(virtualBooks.length,Math.max(start+1,Math.ceil((window.scrollY+innerHeight-top)/h)+6)),key=`mobile:${start}:${end}`;
+ if(!force&&key===virtualRange)return;virtualRange=key;
+ reconcileVirtualRows(list,start,end,mobileRow);
+}
 function syncTableHeader(){
+ if(mobileLayout.matches)return;
  const header=document.querySelector('.table-header-scroll');if(!header)return;
  const viewport=$('book-results'),available=Math.max(722,viewport.clientWidth)-52,widths=[52,...[.36,.27,.11,.13,.13].map(fraction=>fraction*available)];
  document.querySelectorAll('.table-header colgroup,.table-wrap colgroup').forEach(group=>[...group.children].forEach((col,index)=>col.style.width=widths[index]+'px'));
@@ -185,9 +267,11 @@ function syncTableHeader(){
 }
 function scheduleVirtualRender(){syncTableHeader();if(!virtualFrame)virtualFrame=requestAnimationFrame(()=>{virtualFrame=0;renderVirtualResults()})}
 $('book-results').addEventListener('scroll',scheduleVirtualRender,{passive:true});
-$('book-results').addEventListener('keydown',e=>{if(e.target!==e.currentTarget)return;const viewport=e.currentTarget;if(e.key==='Home'||e.key==='End'){e.preventDefault();viewport.scrollTop=e.key==='Home'?0:viewport.scrollHeight}else if(e.key==='PageDown'||e.key==='PageUp'){e.preventDefault();viewport.scrollTop+=(e.key==='PageDown'?1:-1)*viewport.clientHeight}});
+window.addEventListener('scroll',()=>{if(mobileLayout.matches)scheduleVirtualRender()},{passive:true});
+mobileLayout.addEventListener('change',()=>{closeFilters();render()});
+$('book-results').addEventListener('keydown',e=>{if(mobileLayout.matches||e.target!==e.currentTarget)return;const viewport=e.currentTarget;if(e.key==='Home'||e.key==='End'){e.preventDefault();viewport.scrollTop=e.key==='Home'?0:viewport.scrollHeight}else if(e.key==='PageDown'||e.key==='PageUp'){e.preventDefault();viewport.scrollTop+=(e.key==='PageDown'?1:-1)*viewport.clientHeight}});
 new ResizeObserver(scheduleVirtualRender).observe($('book-results'));
-function changed(){$('book-results').scrollTop=0;render()}
+function changed({deferURL=false}={}){$('book-results').scrollTop=0;if(mobileLayout.matches&&$('filters-popover').hidden&&scrollY>$('book-results').getBoundingClientRect().top+scrollY)window.scrollTo({top:0,behavior:'instant'});render();scheduleFilterURL(deferURL)}
 function reset(){hiddenGenres.clear();state.type='all';$('genre-search').value='';state.required.clear();state.selected.clear();state.excluded.clear();$('search').value='';$('min-rating').value='0';$('min-count').value='200000';clearYears();changed()}
 function details(id){const b=state.books.find(x=>String(x.id)===String(id));if(!b)return;const sources=(b.sources||[]).map(s=>typeof s==='string'?s:s.url).filter(Boolean);$('details-content').innerHTML=`<div class="dialog-heading">${cover(b)}<div><h2>${esc(b.title)}</h2><p>${esc(b.author)}${b.publicationYear!=null?` · ${b.publicationYear<0?Math.abs(b.publicationYear)+' BCE':b.publicationYear}`:''}</p></div></div><div>${genresHTML(b,true)}</div><div class="detail-metrics"><div><strong>${b.averageRating.toFixed(2)}</strong><span>Average rating / 5</span></div><div><strong>${metric(b.ratingsCount)}</strong><span>Star ratings</span></div><div><strong>${metric(b.reviewsCount)}</strong><span>Written reviews</span></div></div>${provenance(b)}<a class="source-link" href="${esc(safeURL(b.url))}" target="_blank" rel="noopener noreferrer">View on Goodreads ↗</a>${sources.filter(s=>s!==b.url).length?`<p>Additional sources: ${sources.filter(s=>s!==b.url).map((s,i)=>`<a href="${esc(safeURL(s))}" target="_blank" rel="noopener noreferrer">Source ${i+1}</a>`).join(' · ')}</p>`:''}`;$('details-content').querySelectorAll('img').forEach(img=>img.addEventListener('error',()=>{img.src=fallback},{once:true}));$('details-dialog').showModal();}
 const genreTooltip=$('genre-tooltip');
@@ -220,15 +304,24 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')hideGenreTooltip()})
 window.addEventListener('scroll',hideGenreTooltip,true);window.addEventListener('resize',()=>{hideGenreTooltip();updateGenreOverflow()});
 $('genres').addEventListener('click',e=>{
  const button=e.target.closest('[data-hide-genre]');if(!button)return;
- hiddenGenres.add(button.dataset.hideGenre);render();$('genre-search').focus({preventScroll:true});
+ const index=[...$('genres').querySelectorAll('[data-hide-genre]')].indexOf(button);
+ hiddenGenres.add(button.dataset.hideGenre);render();
+ const remaining=$('genres').querySelectorAll('[data-hide-genre]');
+ const target=e.detail===0?(remaining[Math.min(index,remaining.length-1)]||$('filters-popover')):$('filters-popover');
+ target.focus({preventScroll:true});
 });
 $('genre-search').addEventListener('input',()=>{renderGenres();updateResetButton()});
 $('genres').addEventListener('click',e=>{
  const button=e.target.closest('[data-rule]');if(!button)return;
  const {genre,rule}=button.dataset;setGenreRule(genre,rule);changed();
+ if(state[rule].has(genre)){$('genres').scrollTop=0;if(mobileLayout.matches)$('filters-popover').querySelector('.filters').scrollTop=0;}
  [...$('genres').querySelectorAll('[data-rule]')].find(b=>b.dataset.genre===genre&&b.dataset.rule===rule)?.focus({preventScroll:true});
 });
-['search','min-rating','min-count'].forEach(id=>$(id).addEventListener('input',changed));
+['search','min-rating','min-count'].forEach(id=>$(id).addEventListener('input',()=>changed({deferURL:id!=='min-count'})));
+['search','min-rating','year-from','year-to'].forEach(id=>{
+ $(id).addEventListener('change',syncFilterURL);$(id).addEventListener('blur',syncFilterURL);
+});
+$('year-slider').addEventListener('pointerup',syncFilterURL);
 ['year-min','year-max'].forEach(id=>{$(id).addEventListener('change',commitYearInputs);$(id).addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();commitYearInputs()}})});
 ['year-from','year-to'].forEach(id=>$(id).addEventListener('input',()=>setYearHandle(id,Number($(id).value))));
 // Clicking the track moves the nearest handle; dragging and keyboard input also work.
@@ -260,5 +353,27 @@ function renderSources(sources){
  const lists=sources.map(s=>typeof s==='string'?{url:s}:s).map(s=>({...s,threshold:thresholds[s.url?.match(/goodreads\.com\/list\/show\/(\d+)/)?.[1]]})).filter(s=>s.threshold).sort((a,b)=>a.threshold-b.threshold);
  $('about-sources').innerHTML=lists.map(s=>{const label=s.threshold===200000?'200,000–499,999':s.threshold===500000?'500,000–999,999':`${number.format(s.threshold)}+`;return `<li><a target="_blank" rel="noopener noreferrer" href="${esc(safeURL(s.url))}">${label} ratings <span aria-hidden="true">↗</span></a></li>`}).join('');
 }
-async function load(){try{const response=await fetch('books.json',{cache:'no-store'});if(!response.ok)throw Error('Unable to load');const data=await response.json();if(!Array.isArray(data.books))throw Error('Invalid collection');state.books=data.books.map((b,i)=>({...b,id:String(b.id??b.workId??i),genres:Array.isArray(b.genres)?b.genres:[],averageRating:Number(b.averageRating),ratingsCount:Number(b.ratingsCount),publicationYear:Number.isInteger(b.publicationYear)?b.publicationYear:null,reviewsCount:b.reviewsCount==null?null:Number(b.reviewsCount)})).filter(b=>Number.isFinite(b.averageRating)&&Number.isFinite(b.ratingsCount)&&b.ratingsCount>=200000);assignPopularityRanks(state.books);clearYears();state.checkedDate=data.meta?.checkedDate||'2026-10-05';renderSources(data.meta?.sources||[]);render();}catch(error){$('book-results').setAttribute('aria-busy','false');$('result-count').textContent='Books unavailable';$('result-detail').textContent='Please try again.';$('book-results').innerHTML='<div class="empty-state"><h3>Couldn’t load books.</h3><p>Check your connection and try again.</p><button id="retry">Try again</button></div>';$('retry').addEventListener('click',load);}}
+async function load(){try{const response=await fetch('books.json',{cache:'no-store'});if(!response.ok)throw Error('Unable to load');const data=await response.json();if(!Array.isArray(data.books))throw Error('Invalid collection');state.books=data.books.map((b,i)=>({...b,id:String(b.id??b.workId??i),genres:Array.isArray(b.genres)?b.genres:[],averageRating:Number(b.averageRating),ratingsCount:Number(b.ratingsCount),publicationYear:Number.isInteger(b.publicationYear)?b.publicationYear:null,reviewsCount:b.reviewsCount==null?null:Number(b.reviewsCount)})).filter(b=>Number.isFinite(b.averageRating)&&Number.isFinite(b.ratingsCount)&&b.ratingsCount>=200000);assignPopularityRanks(state.books);clearYears();state.checkedDate=data.meta?.checkedDate||'2026-10-05';renderSources(data.meta?.sources||[]);restoreFilterURL();urlStateReady=true;syncFilterURL();render();}catch(error){$('book-results').setAttribute('aria-busy','false');$('result-count').textContent='Books unavailable';$('result-detail').textContent='Please try again.';$('book-results').innerHTML='<div class="empty-state"><h3>Couldn’t load books.</h3><p>Check your connection and try again.</p><button id="retry">Try again</button></div>';$('retry').addEventListener('click',load);}}
+const mobileSort=document.createElement('select');mobileSort.id='mobile-sort';mobileSort.setAttribute('aria-label','Sort books');mobileSort.innerHTML='<option value="ratingsCount">Most ratings</option><option value="averageRating">Highest rating</option><option value="publicationYear">Newest first</option><option value="title">Title A–Z</option>';
+document.querySelector('.result-heading').append(mobileSort);mobileSort.addEventListener('change',()=>{if(mobileSort.value==='current')return;state.sort=mobileSort.value;state.direction=state.sort==='title'?'asc':'desc';changed()});
+function renderMobileSort(){
+ const select=$('mobile-sort');if(!select)return;
+ select.querySelector('[data-current-sort]')?.remove();
+ if([...select.options].some(o=>o.value===state.sort)&&state.direction===defaultDirection(state.sort)){select.value=state.sort;return;}
+ const labels={ratingsCount:['Fewest ratings','Most ratings'],averageRating:['Lowest rating','Highest rating'],publicationYear:['Oldest first','Newest first'],title:['Title A–Z','Title Z–A'],author:['Author A–Z','Author Z–A'],genre:['Genre A–Z','Genre Z–A'],reviewsCount:['Fewest reviews','Most reviews']};
+ const option=document.createElement('option');option.value='current';option.dataset.currentSort='';option.textContent=labels[state.sort][state.direction==='asc'?0:1];select.append(option);select.value='current';
+}
+const mobileTabs=document.createElement('div');mobileTabs.className='mobile-filter-tabs';mobileTabs.setAttribute('role','tablist');mobileTabs.setAttribute('aria-label','Filter type');mobileTabs.innerHTML='<button role="tab" aria-selected="true" data-mobile-tab="genres">Genres</button><button role="tab" aria-selected="false" data-mobile-tab="other">Rating & year</button>';
+const filterPanel=$('filters-popover');filterPanel.dataset.mobileTab='genres';filterPanel.insertBefore(mobileTabs,filterPanel.querySelector('.filters'));
+const genreHelpLegend=filterPanel.querySelector('.genre-legend'),genreHelpBreakpoint=window.matchMedia('(max-width:760px)');
+function placeGenreHelp(){hideGenreHelp();if(genreHelpBreakpoint.matches)mobileTabs.insertBefore($('genre-help'),mobileTabs.querySelector('[data-mobile-tab="other"]'));else genreHelpLegend.append($('genre-help'));}
+genreHelpBreakpoint.addEventListener('change',placeGenreHelp);placeGenreHelp();
+mobileTabs.addEventListener('click',e=>{const tab=e.target.closest('button[data-mobile-tab]');if(!tab)return;filterPanel.dataset.mobileTab=tab.dataset.mobileTab;mobileTabs.querySelectorAll('button[data-mobile-tab]').forEach(b=>b.setAttribute('aria-selected',String(b===tab)));filterPanel.querySelector('.filters').scrollTop=0});
+const mobileDone=document.createElement('div');mobileDone.className='mobile-filter-footer';mobileDone.innerHTML='<button id="mobile-filter-done">Show books</button>';filterPanel.append(mobileDone);$('mobile-filter-done').addEventListener('click',()=>closeFilters(true));
+function mobileDetails(id){
+ const b=state.books.find(book=>book.id===id);if(!b)return;
+ $('details-content').innerHTML=`<div class="dialog-heading">${cover(b)}<div><h2 tabindex="-1" autofocus>${esc(b.title)}</h2><p>${esc(b.author)}${b.publicationYear!=null?` · ${formatYear(b.publicationYear)}`:''}</p></div></div><dl class="mobile-detail-values"><dt>Overall rank</dt><dd>${number.format(b.popularityRank)}</dd><dt>Average rating</dt><dd>${b.averageRating.toFixed(2)}</dd><dt>Ratings</dt><dd>${metric(b.ratingsCount)}</dd></dl><p class="mobile-detail-genres">${esc(visibleGenres(b).join(', '))}</p><a class="source-link" href="${esc(safeURL(b.url))}" target="_blank" rel="noopener noreferrer">Open Goodreads ↗</a>`;
+ $('details-content').querySelector('img').addEventListener('error',e=>{e.target.src=fallback},{once:true});$('details-dialog').showModal();
+}
+$('book-results').addEventListener('click',e=>{if(e.target.closest('a'))return;const target=e.target.closest('[data-details]');if(target)mobileDetails(target.dataset.details)});
 load();
